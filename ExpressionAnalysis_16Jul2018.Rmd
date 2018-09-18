@@ -1,0 +1,1036 @@
+---
+title: "Liver models analysis"
+author: "Elana Fertig, Mike Considine"
+date: "July 16, 2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE,
+                      warning = FALSE, cache = T)
+
+```
+
+# R setup
+
+## R Packages
+
+```{r include = FALSE}
+library(simpleaffy)
+library('ClassDiscovery')
+library('DT')
+library('limma')
+library(DESeq2)
+library(edgeR)
+library(dplyr)
+library(ggplot2)
+library(dendextend)
+library('org.Mm.eg.db')
+library('GeneOverlap')
+library('GO.db')
+library('KEGG.db')
+library('ComplexHeatmap')
+library(sva)
+library(affy)
+library(simpleaffy)
+library('pca3d')
+
+sessionInfo()
+```
+
+## Support function
+
+```{r include=FALSE}
+getCols=function(class,subclass=NULL,bahman=FALSE){ # make it also work if there is only one class or subclass
+  # set the six hues
+  mycols=c(0,120/360,200/360,60/360,300/360)
+  # if there are subclasses
+  if(!is.null(subclass)){
+    # if the subclasses are a numeric range
+    if(is.numeric(subclass)){
+      
+      # get the range to be 0-1
+      testrange2=(subclass-min(subclass))/max(subclass-min(subclass))
+      #set the color range to be 0.4 to 1, as darker colors can look black despite the hue
+      temp=0.4+testrange2*0.6
+      
+      # get indexes for classes of samples
+      uclas=unique(class)
+      whichclass=class
+      for(i in 1:length(class)){
+        whichclass[which(class==uclas[i])]=i
+      }
+      
+      # assign the colors to the classes vector
+      classcols=mycols[as.numeric(whichclass)]
+      ColResult=class
+      
+      # get the color codes into the vector
+      ColResult=hsv(h=classcols,s=1,v=temp)
+      
+      # if subclass is not numeric
+    }else{
+      
+      # create the list for storing the color codes for each class, relative to the number of subclasses
+      temp=list()
+      
+      # loop through the unique classes, for each sample put in the appropriate range of colors
+      for(i in 1:length(unique(class))){
+        n=length(unique(subclass[which(class==unique(class)[i])])) # how many subclasses are in this class
+        
+        if(n==1){
+          temp[[i]]=hsv(h=mycols[i],s=1,v=1)
+        }else{
+          temp[[i]]=hsv(h=mycols[i],s=1,v=seq(1,0.3,-0.7/(n-1))) # for that list element, create the color range
+        }
+        
+      }
+      
+      # will need to get the numeric rendition of which class and subclass each sample is
+      whichsub=subclass
+      whichclass=class
+      
+      uclas=unique(class)
+      
+      for(i in 1:length(class)){
+        # which samples are each of the unique classes
+        whichclass[which(class==uclas[i])]=i
+        # the unique subclasses for each class
+        usub=unique(subclass[which(class==unique(class)[i])])
+        
+        for(j in 1:length(usub))
+          # which samples are each of the unique subclasses
+          whichsub[which(subclass==usub[j])]=j
+      }
+      
+      whichclass=as.numeric(whichclass)
+      whichsub=as.numeric(whichsub)
+      
+      ColResult=class
+      for(i in 1:length(class)){
+        ColResult[i]=temp[[whichclass[i]]][whichsub[i]]
+      }
+      
+    }
+  }else{ #if there is no subclass, a rainbow is sufficient
+    mycols=rainbow(length(unique(class)))
+    uclas=unique(class)
+    whichclass=class
+    for(i in 1:length(class)){
+      whichclass[which(class==uclas[i])]=i
+    }
+    ColResult=mycols[as.numeric(whichclass)]
+  }
+  if(bahman==TRUE){
+    bahmanlist=as.list(unique(class))
+    names(bahmanlist)=unique(class)
+    names(ColResult)=subclass
+    for(i in class){
+      dup=duplicated(ColResult[class==i])
+      bahmanlist[[i]]=ColResult[class==i][which(!dup)]
+    }
+    ColResult=bahmanlist
+  }
+  return(ColResult)
+} #end getCols
+```
+
+# RNA-seq analysis
+
+## Preprocessing data
+
+### loading in sample annotations
+
+```{r}
+#get annotation
+anno=read.table("RNAseqAnnotation.txt",sep="\t",header=T,as.is=T) 
+rownames(anno)=anno$Sample
+anno$Design <- apply(anno[,c('Type','Site','Twist', 'MYC')],1,paste,collapse=' ')
+```
+
+### loading in read counts from salmon and tximport
+
+```{r}
+load("countsDat.rda")
+
+storage.mode(countsDat) <- "integer"
+
+STCDataSet <- DESeqDataSetFromMatrix(countData = countsDat, colData = anno[colnames(countsDat),], 
+                                     design = ~0+Design) 
+```
+
+### filter genes with only one count per sample
+
+```{r}
+STCDataSet <- STCDataSet[rowSums(counts(STCDataSet))>1,]
+```
+
+### rlog transformation from DESeq2 for visulization
+
+
+```{r}
+dat=countsDat
+logSTCDataSet <- rlog(STCDataSet)
+mat <- assay(logSTCDataSet) #this is the one we use
+boxplot(log2(dat+1),las=2, ylab='log transformed read counts')
+title('before rlog transformation')
+boxplot(mat,las=2, ylab='rlog transformed read counts')
+title('after rlog transformation')
+```
+
+## Exploratory analysis for technical artifacts
+
+### PCA
+ 
+```{r}
+plotPCA(logSTCDataSet, intgroup = c("Type", "Site", "Twist"))
+```
+
+### Clustering
+
+```{r}
+
+
+anno=anno[colnames(countsDat),]
+
+#determine the sample class for each set, they are in the same order for each set
+classes=paste(anno$Site,anno$Type,anno$Twist,anno$MYC,sep=".")
+names(classes)=rownames(anno)
+
+
+
+animalcols=getCols(anno[,'Animal'])
+twistcols=getCols(anno[,'Twist'])
+myccols=getCols(anno[,'MYC'])
+sitecols=getCols(anno[,'Site'])
+cancercols=getCols(anno[,'Type'])
+
+par(mar=c(15.1,4.1,4.1,2.1))
+
+
+hc <- standard.pearson(mat)
+
+hc$labels=paste(anno$Label, anno$Site,anno$Type,anno$MYC,anno$Twist,sep=".")
+
+dend <- as.dendrogram(hc)
+
+colors_to_use <- sitecols
+colors_to_use <- colors_to_use[order.dendrogram(dend)]
+labels_colors(dend) <- colors_to_use
+plot(dend)
+legend(x = "topright",        
+        legend =  unique(anno[,'Site']), 
+        fill=unique(sitecols),border=FALSE, bty="n", y.intersp = 1.2, cex=1.2)
+title('Clustering by site')
+
+colors_to_use <- cancercols
+colors_to_use <- colors_to_use[order.dendrogram(dend)]
+labels_colors(dend) <- colors_to_use
+plot(dend)
+legend(x = "topright",        
+        legend =  unique(anno[,'Type']), 
+        fill=unique(cancercols),border=FALSE, bty="n", y.intersp = 1.2, cex=1.2)
+title('Clustering by sample type')
+
+colors_to_use <- animalcols
+colors_to_use <- colors_to_use[order.dendrogram(dend)]
+labels_colors(dend) <- colors_to_use
+plot(dend)
+legend(x = "topright",        
+        legend =  unique(anno[,'Animal']), 
+        fill=unique(animalcols),border=FALSE, bty="n", y.intersp = 1.2, cex=1.2)
+title('Clustering by replicate number')
+
+```
+
+## Differential expression statistics
+
+1. Twist Primary Tumors vs Nontwist Primary Tumors
+2. Primary Tumor versus Normal Liver
+3. Met versus Primary
+4. Normal Liver versus Normal Lung
+
+
+The underlying concept is what is conferring LMT and LMT-DQD tumors to metastasize. 
+
+```{r}
+dds <- DESeq(STCDataSet, betaPrior = F)
+```
+
+### Twist vs nonTwist
+
+```{r}
+resTwist <- results(dds,contrast=c(0,0,0,0,0,0.5,-0.5,0.5,-0.5))
+datatable(data.frame(resTwist[which(abs(resTwist$log2FoldChange) > 1 & resTwist$padj < 0.05),]))
+sigTwist <- row.names(resTwist)[which(abs(resTwist$log2FoldChange) > 1 & resTwist$padj < 0.05)]
+
+```
+
+### Tumors vs normal liver
+
+```{r}
+resTumor <- results(dds,contrast=c(0,0,0,-1,0,0.25,0.25,0.25,0.25))
+datatable(data.frame(resTumor[which(abs(resTumor$log2FoldChange) > 1 & resTumor$padj < 0.05),]))
+
+sigTumor <- row.names(resTumor)[which(abs(resTumor$log2FoldChange) > 1 & resTumor$padj < 0.05)]
+```
+
+### Mets vs tumors 
+
+```{r}
+resMet <- results(dds,contrast=c(0.5,0.5,0,0,0,-0.5,0,-0.5,0))
+datatable(data.frame(resMet[which(abs(resMet$log2FoldChange) > 1 & resMet$padj < 0.05),]))
+
+sigMet <- row.names(resMet)[which(abs(resMet$log2FoldChange) > 1 & resMet$padj < 0.05)]
+```
+
+### Normal lung vs liver
+
+```{r}
+resNorm <- results(dds,c('Design','Normal Lung WT WT','Normal Liver WT WT'))
+datatable(data.frame(resNorm[which(abs(resNorm$log2FoldChange) > 1 & resNorm$padj < 0.05),]))
+
+sigNorm <- row.names(resNorm)[which(abs(resNorm$log2FoldChange) > 1 & resNorm$padj < 0.05)]
+
+```
+
+### Venn diagram of significant genes
+
+```{r}
+allGene <- unique(rownames(resNorm))
+allStats <- matrix(0, nrow=length(allGene), ncol=4,
+                   dimnames = list(allGene,c('Tumor - Normal', 
+                                             'Met - Primary','Twist - nonTwist','NormLung - NormLiver')))
+allStats[sigMet,'Met - Primary'] <- 1
+allStats[sigTwist,'Twist - nonTwist'] <- 1
+allStats[sigTumor,'Tumor - Normal'] <- 1
+allStats[sigNorm,'NormLung - NormLiver'] <- 1
+
+
+vennDiagram(allStats)
+allStats2=data.frame(allStats)
+allStats2$sum = rowSums(allStats)
+datatable(allStats2)
+write.table(cbind(GeneSymbol=row.names(allStats), allStats),
+            file=sprintf('DEGenes%s.csv',Sys.Date()), sep=",", row.names = F)
+anysig=rownames(allStats2)[which(allStats2$sum>0)]   
+```
+
+### Heatmaps of relevant groups
+
+```{r}
+MetPrimaryOnlySYMBOL <- names(which(allStats[,'Met - Primary']==1 & apply(allStats,1,sum)==1))
+
+datScale <- t(apply(mat[MetPrimaryOnlySYMBOL,], 1, scale))
+colnames(datScale) <- colnames(mat)
+
+annoPlot <- anno[colnames(mat),c('Type','Site','Mutation')]
+
+top_annotation = HeatmapAnnotation(annoPlot, col=list(Type=c(Normal='blue',
+                                                               'Primary tumor'='red',
+                                                               'Met'='black',
+                                                               Unknown='white'),
+                                                             Site=c(Liver='yellow',
+                                                                    Lung='green',
+                                                                    NotApplicable='white'),
+                                                             Mutation=c('WT'='white',
+                                                                        'Twist1'='yellow',
+                                                                        'MYC'='black',
+                                                                        'Twist1 and MYC'='red',
+                                                                        'Twist1-DQD and MYC'='orange',
+                                                                        'Twist1-F191G and MYC'='grey')))
+
+Heatmap(datScale,top_annotation = top_annotation,
+        clustering_distance_rows = "pearson", clustering_distance_columns = "pearson",
+        column_title='Met - Primary only', show_row_names = F)
+
+MetPrimaryNoNormalSYMBOL <-  names(which(allStats[,'Met - Primary']==1 & 
+                                     allStats[,"NormLung - NormLiver"]==0))
+
+
+datScale <- t(apply(mat[MetPrimaryNoNormalSYMBOL,], 1, scale))
+colnames(datScale) <- colnames(mat)
+
+
+rA <- rowAnnotation(data.frame('Tumor - Normal'=as.character(allStats[MetPrimaryNoNormalSYMBOL,'Tumor - Normal'])),col=list('Tumor...Normal'=c('1'='black','0'='white')),
+                    width = unit(1,'cm'))
+hA <- Heatmap(datScale,top_annotation = top_annotation,
+        clustering_distance_rows = "pearson", 
+        clustering_distance_columns = "pearson",
+        column_title ='Met - Primary excluding Normal Lung - Normal Liver',
+        show_row_names = F)
+hA + rA
+```
+
+## GO
+
+### Overrepresentation test
+
+
+```{r}
+SYMBOLToGO <- mapIds(org.Mm.eg.db,keys=rownames(mat),column='GO',keytype = 'SYMBOL',multiVals = list)
+GOToSYMBOL <- sapply(reverseSplit(SYMBOLToGO),unique)
+GOToSYMBOL <- GOToSYMBOL[sapply(GOToSYMBOL,length)>5]
+
+SYMBOLToKEGG <- mapIds(org.Mm.eg.db,keys=rownames(mat),column='PATH',keytype = 'SYMBOL',multiVals = list)
+KEGGToSYMBOL <- sapply(reverseSplit(SYMBOLToKEGG),unique)
+KEGGToSYMBOL <- KEGGToSYMBOL[sapply(KEGGToSYMBOL,length)>5]
+
+MetPrimaryOnlyGO <- p.adjust(sapply(GOToSYMBOL,function(x){getPval(testGeneOverlap(newGeneOverlap(MetPrimaryOnlySYMBOL,
+                                                                     x,
+                                                                     genome.size   = 
+                                                                       length(unique(rownames(mat))))))}),
+                             method='BH')
+MetPrimaryNoNormalGO <- p.adjust(sapply(GOToSYMBOL,function(x){getPval(testGeneOverlap(newGeneOverlap(MetPrimaryNoNormalSYMBOL,
+                                                                     x,
+                                                                     genome.size   = 
+                                                                       length(unique(rownames(mat))))))}),
+                             method='BH')
+
+TwistNoTwistGO <- p.adjust(sapply(GOToSYMBOL,function(x){getPval(testGeneOverlap(newGeneOverlap(sigTwist,
+                                                                     x,
+                                                                     genome.size   = 
+                                                                       length(unique(rownames(mat))))))}),
+                             method='BH')
+
+GOTable <- data.frame(MetPrimaryOnly=MetPrimaryOnlyGO, MetPrimaryNoNormal=MetPrimaryNoNormalGO,
+                      TwistNoTwistPrimary=TwistNoTwistGO)
+GOTable <- cbind(sapply(c('ONTOLOGY','TERM','DEFINITION'),
+                        function(x){mapIds(GO.db,keys=row.names(GOTable),keytype='GOID',column=x)}),GOTable)
+datatable(GOTable)
+
+```
+
+### Enrichment test
+
+```{r}
+
+statMet <- resMet$stat
+names(statMet) <- row.names(resMet)
+GOStatMet <- p.adjust(sapply(GOToSYMBOL,function(x){wilcoxGST(index = x, statistics = statMet,
+                                                              alternative='either')}),
+                      method='BH')
+statTwist <- resTwist$stat
+names(statTwist) <- row.names(resTwist)
+GOStatTwist <- p.adjust(sapply(GOToSYMBOL,function(x){wilcoxGST(index = x, statistics = statTwist,
+                                                              alternative='either')}),
+                      method='BH')
+
+statTumor <- resTumor$stat
+names(statTumor) <- row.names(resTumor)
+GOStatTumor <- p.adjust(sapply(GOToSYMBOL,function(x){wilcoxGST(index = x, statistics = statTumor,
+                                                                alternative='either')}),
+                        method='BH')
+
+statNorm <- resNorm$stat
+names(statNorm) <- row.names(resNorm)
+GOStatNorm <- p.adjust(sapply(GOToSYMBOL,function(x){wilcoxGST(index = x, statistics = statNorm,
+                                                               alternative='either')}),
+                       method='BH')
+
+GOTable <- data.frame(MetPrimary=GOStatMet, 
+                      Tumor=GOStatTumor,
+                      Twist=GOStatTwist,
+                      NormLungLiver=GOStatNorm)
+
+vennDiagram(GOTable<0.05)
+
+GOTable <- cbind(sapply(c('ONTOLOGY','TERM','DEFINITION'),
+                        function(x){mapIds(GO.db,keys=row.names(GOTable),keytype='GOID',column=x)}),GOTable)
+
+datatable(GOTable)
+```
+
+## KEGG
+
+### Overrepresentation statistic
+
+```{r}
+
+MetPrimaryOnlyKEGG <- p.adjust(sapply(KEGGToSYMBOL,function(x){getPval(testGeneOverlap(newGeneOverlap(MetPrimaryOnlySYMBOL,
+                                                                     x,
+                                                                     genome.size   = 
+                                                                       length(unique(rownames(mat))))))}),
+                             method='BH')
+MetPrimaryNoNormalKEGG <- p.adjust(sapply(KEGGToSYMBOL,function(x){getPval(testGeneOverlap(newGeneOverlap(MetPrimaryNoNormalSYMBOL,
+                                                                     x,
+                                                                     genome.size   = 
+                                                                       length(unique(rownames(mat))))))}),
+                             method='BH')
+
+MetPrimaryTwistNoTwist <- p.adjust(sapply(KEGGToSYMBOL,function(x){getPval(testGeneOverlap(newGeneOverlap(sigTwist,
+                                                                     x,
+                                                                     genome.size   = 
+                                                                       length(unique(rownames(mat))))))}),
+                             method='BH')
+
+KEGGTable <- data.frame(MetPrimaryOnly=MetPrimaryOnlyKEGG, MetPrimaryNoNormal=MetPrimaryNoNormalKEGG,
+                        TwistNoTwist=MetPrimaryTwistNoTwist)
+
+KEGGTable <- cbind(KEGG.Name=unlist(as.list(KEGGPATHID2NAME)[row.names(KEGGTable)]),
+                   KEGGTable)
+datatable(KEGGTable)
+```
+
+### Enrichment statistic 
+
+```{r}
+
+
+statMet <- resMet$stat
+names(statMet) <- row.names(resMet)
+KEGGStatMet <- p.adjust(sapply(KEGGToSYMBOL,function(x){wilcoxGST(index = x, statistics = statMet,
+                                                              alternative='either')}),
+                      method='BH')
+statTwist <- resTwist$stat
+names(statTwist) <- row.names(resTwist)
+KEGGStatTwist <- p.adjust(sapply(KEGGToSYMBOL,function(x){wilcoxGST(index = x, statistics = statTwist,
+                                                              alternative='either')}),
+                      method='BH')
+
+statTumor <- resTumor$stat
+names(statTumor) <- row.names(resTumor)
+KEGGStatTumor <- p.adjust(sapply(KEGGToSYMBOL,function(x){wilcoxGST(index = x, statistics = statTumor,
+                                                                alternative='either')}),
+                        method='BH')
+
+statNorm <- resNorm$stat
+names(statNorm) <- row.names(resNorm)
+KEGGStatNorm <- p.adjust(sapply(KEGGToSYMBOL,function(x){wilcoxGST(index = x, statistics = statNorm,
+                                                               alternative='either')}),
+                       method='BH')
+
+KEGGTable <- data.frame(MetPrimary=KEGGStatMet, 
+                      Tumor=KEGGStatTumor,
+                      Twist=KEGGStatTwist,
+                      NormLungLiver=KEGGStatNorm)
+
+vennDiagram(KEGGTable<0.05)
+
+KEGGTable <- cbind(KEGG.Name=unlist(as.list(KEGGPATHID2NAME)[row.names(KEGGTable)]),
+                   KEGGTable)
+datatable(KEGGTable)
+```
+
+# Proteomics data
+
+## Loading in raw proteomics protdata
+
+```{r}
+
+# get protannotation
+protanno=read.table("Annotation.txt",sep="\t",header=T,as.is=T)
+row.names(protanno) <- protanno$Label
+
+# get protdata
+protdat1=read.table("Tran_Liver_Lung_Set1_Proteomics_Mustafa_Edited2.txt",sep="\t",header=T,as.is=T)
+protdat2=read.table("Tran_Liver_Lung_Set2_Proteomics_Mustafa_Edited2.txt",sep="\t",header=T,as.is=T)
+protdat3=read.table("Tran_Liver_Lung_Set3_Proteomics_Mustafa_Edited2.txt",sep="\t",header=T,as.is=T)
+
+#find the common targets in each set
+int1=intersect(protdat1$Accession, protdat2$Accession)
+int2=intersect(int1,protdat3$Accession)
+
+protdat1o=protdat1[protdat1$Accession%in%int2,]
+protdat2o=protdat2[protdat2$Accession%in%int2,]
+protdat3o=protdat3[protdat3$Accession%in%int2,]
+
+#set their row names for ordering
+rownames(protdat1o)=protdat1o$Accession
+rownames(protdat2o)=protdat2o$Accession
+rownames(protdat3o)=protdat3o$Accession
+
+#order them in same order
+protdat1o=protdat1o[int2,]
+protdat2o=protdat2o[int2,]
+protdat3o=protdat3o[int2,]
+
+geneprotanno=protdat2o$Gene.ID
+names(geneprotanno)=protdat2o$Accession
+
+#samples from each batch
+protdat1s=grep("Abundance", colnames(protdat1o))
+protdat2s=grep("Abundance", colnames(protdat2o))
+protdat3s=grep("Abundance", colnames(protdat3o))
+
+#combine the protdata sets
+protdat=cbind(protdat1o[,protdat1s],protdat2o[,protdat2s],protdat3o[,protdat3s])
+
+for(i in 1:(ncol(protdat))){
+  protdat[,i]=as.numeric(as.character(protdat[,i]))
+}
+
+protdat <- protdat[!apply(is.na(protdat),1,any),]
+
+colnames(protdat) <- paste(rep(c('Set1','Set2','Set3'),
+                           c(length(protdat1s),length(protdat2s),length(protdat3s))),
+  gsub('Abundances..','',gsub('..Sample','',gsub('Abundance..','',
+                                                 gsub('Abundances..Grouped...','',colnames(protdat),fixed=T),
+                                                 fixed=T),fixed=T),fixed=T),sep=".")
+
+fprotdat <- cbind(Accession=protdat1o$Accession,Entrez=as.character(protdat1o$Entrez.Gene.ID),
+              Symbol=mapIds(org.Mm.eg.db,keys = as.character(protdat1o$Entrez.Gene.ID),
+                            keytype  = 'ENTREZID',column = 'SYMBOL',
+                            multiVals = 'first'))
+row.names(fprotdat) <- protdat1o$Accession
+
+fprotdat <- fprotdat[row.names(protdat),]
+
+```
+
+## Assessment of batch effects
+
+Distribution of proteomics protdata reveals a clear plate-specific effect on abundance
+
+```{r}
+boxplot(log2(protdat+1),las=2, 
+        border=rep(c('blue','black','red'),
+                c(length(protdat1s),length(protdat2s),length(protdat3s))),
+        ylab='log2 abundance')
+```
+
+## Loess normalization of the protdata
+
+```{r,message=F,results='hide'}
+protdat.loess <- normalize.loess(log2(protdat+1))
+
+boxplot(protdat.loess,las=2, 
+        border=rep(c('blue','black','red'),
+                c(length(protdat1s),length(protdat2s),length(protdat3s))),
+        ylab='loess log2 abundance')
+
+plotColoredClusters(standard.pearson(protdat.loess),cols = rep(c('blue','black','red'),
+                c(length(protdat1s),length(protdat2s),length(protdat3s))),labs=colnames(protdat.loess))
+```
+
+## ComBat batch correction
+
+```{r}
+protdat.loess.combat <- ComBat(dat = protdat.loess,batch = rep(c('Set1','Set2','Set3'),
+                                   c(length(protdat1s),length(protdat2s),length(protdat3s))),
+       mod=model.matrix(~gsub('Set[1-3]\\.','',colnames(protdat.loess))))
+
+boxplot(protdat.loess.combat,las=2, 
+        border=rep(c('blue','black','red'),
+                c(length(protdat1s),length(protdat2s),length(protdat3s))),
+        ylab='combat loess log2 abundance')
+
+plotColoredClusters(standard.pearson(protdat.loess.combat),cols = rep(c('blue','black','red'),
+                c(length(protdat1s),length(protdat2s),length(protdat3s))),labs=colnames(protdat.loess.combat))
+legend('topright',fill=c('blue','black','red'),legend=c('Set 1','Set 2','Set 3'))
+
+plotColoredClusters(standard.pearson(protdat.loess.combat),
+                    cols=as.character(as.numeric(factor(protanno[sub('Set[1-3]\\.','',
+                                                                     colnames(protdat.loess.combat)),'Site']))),
+                    labs=apply(protanno[sub('Set[1-3]\\.','',
+                                            colnames(protdat.loess.combat)),
+                                        c('Type','Mutation')],1,paste,collapse=" "),xlab='')
+legend('topright',fill=c('red','black','green'),legend=c('Lung','Liver','Unknown'))
+       
+```
+## Differential abundance statistics
+
+1. Twist Primary Tumors vs Nontwist Primary Tumors
+2. Primary Tumor versus Normal Liver
+3. Met versus Primary
+4. Normal Liver versus Normal Lung
+
+```{r}
+sampleGrp <- make.names(apply(protanno[sub('Set[1-3]\\.','',colnames(protdat.loess.combat)),
+                                       c('Type','Mutation','Site')],1,paste,collapse=" "))
+
+```
+
+```{r}
+statsTopTable <- function(tt) {
+  tt <- tt[!duplicated(tt$ID.Symbol),]
+  tt <- tt[!is.na(tt$ID.Symbol),]
+  tstat <- tt$t
+  names(tstat) <- tt$ID.Symbol
+  
+  return(tstat)
+}
+```
+
+
+### Twist vs nonTwist
+
+Among all proteins
+
+```{r}
+mm <- model.matrix(~0+sampleGrp)
+lmF <- lmFit(protdat.loess.combat,design = mm)
+lmF$genes$Entrez <- fprotdat[row.names(lmF),'Entrez']
+lmF$genes$Symbol <- fprotdat[row.names(lmF),'Symbol']
+ct <- makeContrasts((sampleGrpPrimary.tumor.Twist1.and.MYC.Liver + sampleGrpPrimary.tumor.Twist1.DQD.and.MYC.Liver)/2 - (sampleGrpPrimary.tumor.Twist1.F191G.and.MYC.Liver + sampleGrpPrimary.tumor.MYC.Liver)/2,
+                    levels = mm)
+protTwist = eBayes(contrasts.fit(lmF,ct))
+
+protStatTwist <- statsTopTable(topTable(protTwist,coef=1,number=Inf))
+  
+datatable(topTable(protTwist, p.value = 0.05, number = Inf, lfc=1, coef=1))
+
+protsigTwist <- topTable(protTwist, p.value = 0.05, number = Inf, lfc=1, coef=1)$ID.Symbol
+```
+
+Among proteins that are also differentially expressed at an RNA level
+
+```{r}
+overlappingsig=fprotdat[fprotdat[,'Symbol']%in%sigTwist,'Accession']
+datatable(topTable(protTwist[overlappingsig,], p.value = 0.05, number = Inf, lfc=1, coef=1))
+
+protsigTwistRNA <- topTable(protTwist[overlappingsig,], p.value = 0.05, number = Inf, lfc=1, coef=1)$Symbol
+protsigTwistRNA <- protsigTwistRNA[!is.na(protsigTwistRNA)]
+protsigTwistRNA <- as.character(unique(protsigTwistRNA))
+
+```
+
+### Tumor vs Normal
+
+Among all proteins
+
+
+```{r}
+mm <- model.matrix(~0+sampleGrp)
+lmF <- lmFit(protdat.loess.combat,design = mm)
+lmF$genes$Entrez <- fprotdat[row.names(lmF),'Entrez']
+lmF$genes$Symbol <- fprotdat[row.names(lmF),'Symbol']
+
+ctTumor <- makeContrasts((sampleGrpPrimary.tumor.Twist1.and.MYC.Liver + sampleGrpPrimary.tumor.MYC.Liver +
+                            sampleGrpPrimary.tumor.Twist1.F191G.and.MYC.Liver +
+                            sampleGrpPrimary.tumor.Twist1.DQD.and.MYC.Liver)/2 - 
+                         sampleGrpNormal.WT.Liver, levels = mm)
+
+protTumor <- topTable(eBayes(contrasts.fit(lmF,ctTumor)), number=Inf, coef=1,
+                      p.value = 0.05, lfc = 1)
+
+protStatTumor <- statsTopTable(topTable(eBayes(contrasts.fit(lmF,ctTumor)), number=Inf, coef=1))
+
+datatable(protTumor)
+
+protsigTumor <- protTumor$ID.Symbol[protTumor$adj.P.Val < 0.05 &  abs(protTumor$logFC) > 1]
+protsigTumor <- unique(protsigTumor[!is.na(protsigTumor)])
+```
+
+Among proteins that are also differentially expressed at an RNA level
+
+```{r}
+overlappingsig=unique(fprotdat[fprotdat[,'Symbol']%in%sigTumor,'Accession'])
+datatable(topTable(eBayes(contrasts.fit(lmF[overlappingsig,],ctTumor)), number=Inf, coef=1,
+                      p.value = 0.05, lfc = 1))
+
+protsigTumorRNA <- topTable(eBayes(contrasts.fit(lmF[overlappingsig,],ctTumor)), number=Inf, coef=1,
+                      p.value = 0.05, lfc = 1)$Symbol
+
+protsigTumorRNA <- as.character(unique(protsigTumorRNA[!is.na(protsigTumorRNA)]))
+```
+
+### Met vs primary
+
+Among all proteins
+
+
+```{r}
+mm <- model.matrix(~0+sampleGrp)
+lmF <- lmFit(protdat.loess.combat,design = mm)
+lmF$genes$Entrez <- fprotdat[row.names(lmF),'Entrez']
+lmF$genes$Symbol <- fprotdat[row.names(lmF),'Symbol']
+
+ctMet <- makeContrasts((sampleGrpMet.Twist1.and.MYC.Lung + 
+                          sampleGrpMet.Twist1.DQD.and.MYC.Lung)/2 - 
+                         (sampleGrpPrimary.tumor.Twist1.and.MYC.Liver + 
+                          sampleGrpPrimary.tumor.Twist1.DQD.and.MYC.Liver)/2 ,
+                       levels = mm)
+
+protMet <- topTable(eBayes(contrasts.fit(lmF,ctMet)), number=Inf, coef=1, p.value = 0.05, lfc = 1)
+datatable(protMet)
+
+protStatMet <- statsTopTable(topTable(eBayes(contrasts.fit(lmF,ctMet)), number=Inf, coef=1))
+
+
+protsigMet <- protMet$ID.Symbol[protMet$adj.P.Val < 0.05 &  abs(protMet$logFC) > 1]
+protsigMet <- unique(protsigMet[!is.na(protsigMet)])
+```
+
+Among proteins that are also differentially expressed at an RNA level
+
+```{r}
+overlappingsig=unique(fprotdat[fprotdat[,'Symbol']%in%sigMet,'Accession'])
+datatable(topTable(eBayes(contrasts.fit(lmF[overlappingsig,],ctMet)), number=Inf, coef=1,
+                      p.value = 0.05, lfc = 1))
+
+protsigMetRNA <- topTable(eBayes(contrasts.fit(lmF[overlappingsig,],ctMet)), number=Inf, coef=1,
+                      p.value = 0.05, lfc = 1)$Symbol
+protsigMetRNA <- as.character(unique(protsigMetRNA[!is.na(protsigMetRNA)]))
+```
+
+### Lung vs Liver
+
+Among all proteins
+
+
+```{r}
+mm <- model.matrix(~0+sampleGrp)
+lmF <- lmFit(protdat.loess.combat,design = mm)
+lmF$genes$Entrez <- fprotdat[row.names(lmF),'Entrez']
+lmF$genes$Symbol <- fprotdat[row.names(lmF),'Symbol']
+
+ctNormal <- makeContrasts(sampleGrpNormal.WT.Lung - sampleGrpNormal.WT.Liver, 
+                          levels=mm)
+
+protNorm <- topTable(eBayes(contrasts.fit(lmF,ctNormal)), number=Inf, coef=1,lfc=1,p.value = 0.05)
+datatable(protNorm)
+
+protStatNorm <- statsTopTable(topTable(eBayes(contrasts.fit(lmF,ctNormal)), number=Inf, coef=1))
+
+
+protsigNorm <- protNorm$ID.Symbol[protNorm$adj.P.Val < 0.05 &  abs(protNorm$logFC) > 1]
+protsigNorm <- unique(protsigNorm[!is.na(protsigNorm)])
+```
+
+Among proteins that are also differentially expressed at an RNA level
+
+```{r}
+overlappingsig=unique(fprotdat[fprotdat[,'Symbol']%in%sigNorm,'Accession'])
+datatable(topTable(eBayes(contrasts.fit(lmF[overlappingsig,],ctNormal)), number=Inf, coef=1,
+                      p.value = 0.05, lfc = 1))
+
+protSigNormRNA <- topTable(eBayes(contrasts.fit(lmF[overlappingsig,],ctNormal)), number=Inf, coef=1,
+                      p.value = 0.05, lfc = 1)$Symbol
+protSigNormRNA <- as.character(unique(protSigNormRNA[!is.na(protSigNormRNA)]))
+```
+
+### Venn diagram
+
+All proteins
+
+```{r}
+allGene <- unique(fprotdat[,'Symbol'])
+allGene=allGene[!is.na(allGene)]
+protallStats <- matrix(0, nrow=length(allGene), ncol=4,
+                   dimnames = list(allGene,c('Tumor - Normal', 
+                                             'Met - Primary','Twist - nonTwist','NormLung - NormLiver')))
+protallStats[protsigMet,'Met - Primary'] <- 1
+protallStats[protsigTwist,'Twist - nonTwist'] <- 1
+protallStats[protsigTumor,'Tumor - Normal'] <- 1
+protallStats[protsigNorm,'NormLung - NormLiver'] <- 1
+
+
+vennDiagram(protallStats)
+protallStats2=data.frame(protallStats)
+protallStats2$sum = rowSums(protallStats)
+datatable(protallStats2)
+write.table(cbind(GeneSymbol=row.names(protallStats), protallStats),
+            file=sprintf('protGenes%s.csv',Sys.Date()), sep=",", row.names = F)
+```
+
+Proteins that are also differentially expressed in RNA
+
+```{r}
+allGene <- unique(fprotdat[,'Symbol'])
+allGene=allGene[!is.na(allGene)]
+protallStatsRNA <- matrix(0, nrow=length(allGene), ncol=4,
+                   dimnames = list(allGene,c('Tumor - Normal', 
+                                             'Met - Primary','Twist - nonTwist','NormLung - NormLiver')))
+protallStatsRNA[protsigMetRNA,'Met - Primary'] <- 1
+protallStatsRNA[protsigTwistRNA,'Twist - nonTwist'] <- 1
+protallStatsRNA[protsigTumorRNA,'Tumor - Normal'] <- 1
+protallStatsRNA[protSigNormRNA,'NormLung - NormLiver'] <- 1
+
+
+vennDiagram(protallStatsRNA)
+protallStats2=data.frame(protallStatsRNA)
+protallStats2$sum = rowSums(protallStatsRNA)
+datatable(protallStats2)
+write.table(cbind(GeneSymbol=row.names(protallStats2), protallStats2),
+            file=sprintf('protGenesSigRNA%s.csv',Sys.Date()), sep=",", row.names = F)
+```
+
+
+## GO
+
+### Overrepresentation test
+
+Proteomics only
+
+```{r}
+SYMBOLToGO <- mapIds(org.Mm.eg.db,keys=allGene,column='GO',keytype = 'SYMBOL',multiVals = list)
+GOToSYMBOL <- sapply(reverseSplit(SYMBOLToGO),unique)
+GOToSYMBOL <- GOToSYMBOL[sapply(GOToSYMBOL,length)>5]
+
+SYMBOLToKEGG <- mapIds(org.Mm.eg.db,keys=allGene,column='PATH',keytype = 'SYMBOL',multiVals = list)
+KEGGToSYMBOL <- sapply(reverseSplit(SYMBOLToKEGG),unique)
+KEGGToSYMBOL <- KEGGToSYMBOL[sapply(KEGGToSYMBOL,length)>5]
+
+ProtMetPrimaryOnlySYMBOL <- names(which(protallStats[,'Met - Primary']==1 & apply(protallStats,1,sum)==1))
+
+ProtMetPrimaryOnlyGO <- p.adjust(sapply(GOToSYMBOL,function(x){getPval(testGeneOverlap(newGeneOverlap(ProtMetPrimaryOnlySYMBOL,
+                                                                     x,
+                                                                     genome.size   = 
+                                                                       length(allGene))))}),
+                             method='BH')
+
+ProtMetPrimaryNoNormalSYMBOL <-  names(which(protallStats[,'Met - Primary']==1 & 
+                                     protallStats[,"NormLung - NormLiver"]==0))
+ProtMetPrimaryNoNormalGO <- p.adjust(sapply(GOToSYMBOL,function(x){getPval(testGeneOverlap(newGeneOverlap(ProtMetPrimaryNoNormalSYMBOL,
+                                                                     x,
+                                                                     genome.size   = 
+                                                                       length(allGene))))}),
+                             method='BH')
+
+
+ProtGOTable <- data.frame(MetPrimaryOnly=ProtMetPrimaryOnlyGO, MetPrimaryNoNormal=ProtMetPrimaryNoNormalGO)
+ProtGOTable <- cbind(sapply(c('ONTOLOGY','TERM','DEFINITION'),
+                        function(x){mapIds(GO.db,keys=row.names(ProtGOTable),keytype='GOID',column=x)}),ProtGOTable)
+datatable(ProtGOTable)
+
+```
+
+Note that few pathways were signficant at an RNA level and therefore do not compare.
+
+
+### Enrichment test
+
+Proteomics only
+
+```{r}
+
+ProtGOStatMet <- p.adjust(sapply(GOToSYMBOL,function(x){wilcoxGST(index = x, statistics = protStatMet,
+                                                              alternative='either')}),
+                      method='BH')
+
+
+ProtGOStatTwist <- p.adjust(sapply(GOToSYMBOL,function(x){wilcoxGST(index = x, statistics = protStatTwist,
+                                                              alternative='either')}),
+                      method='BH')
+
+ProtGOStatTumor <- p.adjust(sapply(GOToSYMBOL,function(x){wilcoxGST(index = x, statistics = protStatTumor,
+                                                                alternative='either')}),
+                        method='BH')
+
+
+ProtGOStatNorm <- p.adjust(sapply(GOToSYMBOL,function(x){wilcoxGST(index = x, statistics = protStatNorm,
+                                                               alternative='either')}),
+                       method='BH')
+
+ProtGOTable <- data.frame(MetPrimary=ProtGOStatMet, 
+                      Tumor=ProtGOStatTumor,
+                      Twist=ProtGOStatTwist,
+                      NormLungLiver=ProtGOStatNorm)
+
+vennDiagram(ProtGOTable<0.05)
+
+ProtGOTable <- cbind(sapply(c('ONTOLOGY','TERM','DEFINITION'),function(x){mapIds(GO.db,keys=row.names(ProtGOTable),keytype='GOID',column=x)}),ProtGOTable)
+
+datatable(ProtGOTable[apply(ProtGOTable < 0.05,1,any,na.rm=T),])
+```
+
+### Comparison of enrichment statistics for protein and gene expression
+
+```{r}
+GOBoth <- intersect(row.names(GOTable), row.names(ProtGOTable))
+
+GOBothTable <- GOTable[GOBoth,c('ONTOLOGY','TERM','DEFINITION')]
+
+for (comp in c('MetPrimary','Tumor','Twist','NormLungLiver')) {
+  
+  newDat <- cbind(Exprs=GOTable[GOBoth,comp] < 0.05, 
+                    Prot=ProtGOTable[GOBoth,comp]<0.05)
+  
+  vennDiagram(newDat)
+  title(comp)
+  
+  GOBothTable[,comp] <- GOTable[GOBoth,comp] < 0.05 & ProtGOTable[GOBoth,comp] < 0.05
+
+}
+
+datatable(GOBothTable)
+```
+
+## KEGG
+
+### Overrepresentation statistic
+
+Proteomics only
+
+```{r}
+
+ProtMetPrimaryOnlyKEGG <- p.adjust(sapply(KEGGToSYMBOL,function(x){getPval(testGeneOverlap(newGeneOverlap(ProtMetPrimaryOnlySYMBOL,
+                                                                     x,
+                                                                     genome.size   = 
+                                                                       length(unique(rownames(mat))))))}),
+                             method='BH')
+ProtMetPrimaryNoNormalKEGG <- p.adjust(sapply(KEGGToSYMBOL,function(x){getPval(testGeneOverlap(newGeneOverlap(ProtMetPrimaryNoNormalSYMBOL,
+                                                                     x,
+                                                                     genome.size   = 
+                                                                       length(unique(rownames(mat))))))}),
+                             method='BH')
+
+
+
+ProtKEGGTable <- data.frame(MetPrimaryOnly=ProtMetPrimaryOnlyKEGG, MetPrimaryNoNormal=ProtMetPrimaryNoNormalKEGG)
+
+ProtKEGGTable <- data.frame(KEGG.Name=unlist(as.list(KEGGPATHID2NAME)[row.names(ProtKEGGTable)]),
+                   ProtKEGGTable)
+datatable(ProtKEGGTable)
+```
+
+### Enrichment statistic 
+
+Proteomics only
+
+```{r}
+ProtKEGGStatMet <- p.adjust(sapply(KEGGToSYMBOL,function(x){wilcoxGST(index = x, statistics = protStatMet,
+                                                              alternative='either')}),
+                      method='BH')
+
+ProtKEGGStatTwist <- p.adjust(sapply(KEGGToSYMBOL,function(x){wilcoxGST(index = x, statistics = protStatTwist,
+                                                              alternative='either')}),
+                      method='BH')
+
+ProtKEGGStatTumor <- p.adjust(sapply(KEGGToSYMBOL,function(x){wilcoxGST(index = x, statistics = protStatTumor,
+                                                                alternative='either')}),
+                        method='BH')
+
+
+ProtKEGGStatNorm <- p.adjust(sapply(KEGGToSYMBOL,function(x){wilcoxGST(index = x, statistics = protStatNorm,
+                                                               alternative='either')}),
+                       method='BH')
+
+ProtKEGGTable <- data.frame(MetPrimary=ProtKEGGStatMet, 
+                      Tumor=ProtKEGGStatTumor,
+                      Twist=ProtKEGGStatTwist,
+                      NormLungLiver=ProtKEGGStatNorm)
+
+vennDiagram(ProtKEGGTable<0.05)
+
+ProtKEGGTable <- cbind(KEGG.Name=unlist(as.list(KEGGPATHID2NAME)[row.names(ProtKEGGTable)]),
+                   ProtKEGGTable)
+datatable(ProtKEGGTable)
+```
+
+
+
+### Comparison of enrichment statistics for protein and gene expression
+
+```{r}
+KEGGBoth <- intersect(row.names(KEGGTable), row.names(ProtKEGGTable))
+
+KEGGBothTable <- data.frame(KEGG.Name=KEGGTable[KEGGBoth,c('KEGG.Name')])
+row.names(KEGGBothTable) <- KEGGBoth
+
+for (comp in c('MetPrimary','Tumor','Twist','NormLungLiver')) {
+  
+  newDat <- cbind(Exprs=KEGGTable[KEGGBoth,comp] < 0.05, 
+                    Prot=ProtKEGGTable[KEGGBoth,comp]<0.05)
+  
+  vennDiagram(newDat)
+  title(comp)
+  
+  KEGGBothTable[,comp] <- KEGGTable[KEGGBoth,comp] < 0.05 & ProtKEGGTable[KEGGBoth,comp] < 0.05
+
+}
+
+datatable(KEGGBothTable)
+
+```
