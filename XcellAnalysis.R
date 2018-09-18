@@ -1,6 +1,6 @@
 library('ComplexHeatmap')
 
-read.table('~/Dropbox/EMT_HCC_RNASeq_Proteomics_Tran_Lab/FertigConsidineAnalysis/xCell_countsDatHG_xCell_1034071818.txt',
+read.table('xCell_countsDatHG_xCell_1034071818.txt',
            header=T, sep="\t", row.names=1, stringsAsFactors = F) -> xcell
 
 xcell <- xcell[apply(xcell, 1, sd) > 1e-2,]
